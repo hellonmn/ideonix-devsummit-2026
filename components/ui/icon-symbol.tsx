@@ -14,10 +14,58 @@ type IconSymbolName = keyof typeof MAPPING;
  * - see SF Symbols in the [SF Symbols](https://developer.apple.com/sf-symbols/) app.
  */
 const MAPPING = {
+  // Navigation
   'house.fill': 'home',
+  'house': 'home',
+  'person.fill': 'person',
+  'person': 'person-outline',
+  'chevron.left': 'chevron-left',
+  'chevron.right': 'chevron-right',
+  'xmark': 'close',
+  'plus': 'add',
+  'checkmark': 'check',
+
+  // Tabs & general UI
   'paperplane.fill': 'send',
   'chevron.left.forwardslash.chevron.right': 'code',
-  'chevron.right': 'chevron-right',
+  'gear': 'settings',
+  'bell.fill': 'notifications',
+  'chart.bar.fill': 'bar-chart',
+  'info.circle': 'info-outline',
+  'questionmark.circle': 'help-outline',
+
+  // Subject icons
+  'book.fill': 'menu-book',
+  'bolt.fill': 'flash-on',
+  'folder.fill': 'folder',
+  'lightbulb': 'lightbulb-outline',
+  'headphones': 'headphones',
+  'pencil': 'edit',
+  'function': 'functions',
+  'laptopcomputer': 'laptop',
+  'music.note': 'music-note',
+  'chart.pie.fill': 'pie-chart',
+  'star.fill': 'star',
+  'pencil.and.outline': 'edit-note',
+
+  // Recording
+  'ear': 'hearing',
+  'text.bubble': 'chat',
+  'play.fill': 'play-arrow',
+  'pause.fill': 'pause',
+  'mic.fill': 'mic',
+  'play.circle': 'play-circle-outline',
+
+  // Auth & forms
+  'lock.fill': 'lock',
+  'eye': 'visibility',
+  'eye.slash': 'visibility-off',
+  'ellipsis': 'more-horiz',
+
+  // Misc
+  'line.diagonal': 'show-chart',
+  'arrow.up.right': 'trending-up',
+  'plus.rectangle.on.rectangle': 'library-add',
 } as IconMapping;
 
 /**
@@ -37,5 +85,10 @@ export function IconSymbol({
   style?: StyleProp<TextStyle>;
   weight?: SymbolWeight;
 }) {
-  return <MaterialIcons color={color} size={size} name={MAPPING[name]} style={style} />;
+  const mappedName = MAPPING[name];
+  if (!mappedName) {
+    // Fallback to a default icon if mapping is missing
+    return <MaterialIcons color={color} size={size} name="help-outline" style={style} />;
+  }
+  return <MaterialIcons color={color} size={size} name={mappedName} style={style} />;
 }
