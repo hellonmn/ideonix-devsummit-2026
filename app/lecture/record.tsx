@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Image, Platform, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import Animated, { 
   useAnimatedStyle, 
   useSharedValue, 
@@ -74,10 +74,27 @@ const ScrollingRecordingWave = () => {
   );
 };
 
-export default function RecordLectureScreen() {
-  const [status, setStatus] = useState<'idle' | 'recording' | 'finished'>('idle');
-  const [seconds, setSeconds] = useState(0);
+import * as FileSystem from 'expo-file-system/legacy';
+import { Audio } from 'expo-av';
+import { lecturesApi } from '@/services/api';
 
+export default function RecordLectureScreen() {
+  const { subjectId, subjectTitle } = useLocalSearchParams();
+  const [status, setStatus] = useState<'idle' | 'recording' | 'finished'>('idle');
+  const statusRef = useRef(status);
+  
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
+
+  const [seconds, setSeconds] = useState(0);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  
+  const recordingRef = useRef<Audio.Recording | null>(null);
+
+  // Timer logic
   useEffect(() => {
     let interval: NodeJS.Timeout;
     if (status === 'recording') {
@@ -87,6 +104,82 @@ export default function RecordLectureScreen() {
     }
     return () => clearInterval(interval);
   }, [status]);
+
+  // Recording logic
+  const startRecordingFlow = async () => {
+    try {
+      // 1. Request Permission
+      const permission = await Audio.requestPermissionsAsync();
+      if (permission.status !== 'granted') {
+        alert('Permission to access microphone is required!');
+        return;
+      }
+
+      // 2. Start Session on Server
+      const lectureTitle = subjectTitle ? `${subjectTitle} Lecture` : 'New Lecture';
+      const sessionData = await lecturesApi.startLecture(lectureTitle, subjectId as string);
+      console.log(`[Session] Started: ${sessionData.sessionId}`);
+      setSessionId(sessionData.sessionId);
+      
+      // 3. Setup Audio Mode
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+
+      // 4. Start recording
+      const { recording } = await Audio.Recording.createAsync(
+        Audio.RecordingOptionsPresets.HIGH_QUALITY
+      );
+      recordingRef.current = recording;
+      setStatus('recording');
+
+    } catch (err) {
+      console.error('Failed to start recording:', err);
+      alert('Error starting recording');
+    }
+  };
+
+  const stopRecordingFlow = async () => {
+    if (!recordingRef.current || !sessionId) return;
+    
+    setStatus('finished');
+    setIsUploading(true);
+
+    try {
+      // 1. Stop and unload
+      await recordingRef.current.stopAndUnloadAsync();
+      const tempUri = recordingRef.current.getURI();
+      
+      if (tempUri) {
+        // 2. Ensure directory exists and move to local storage
+        const dirPath = `${FileSystem.documentDirectory}lectures/`;
+        const dirInfo = await FileSystem.getInfoAsync(dirPath);
+        if (!dirInfo.exists) {
+          await FileSystem.makeDirectoryAsync(dirPath, { recursive: true });
+        }
+        
+        const localPath = `${dirPath}${sessionId}_full.m4a`;
+        await FileSystem.moveAsync({ from: tempUri, to: localPath });
+        
+        console.log(`Full audio saved locally at: ${localPath}`);
+
+        // 3. Upload with progress
+        await lecturesApi.uploadFull(sessionId, localPath, (progress) => {
+          setUploadProgress(progress);
+        });
+        
+        setUploadProgress(100);
+        console.log('[Lecture] Full upload completed');
+      }
+    } catch (e: any) {
+      console.error('Error in stop flow:', e);
+      alert('Failed to save or upload recording');
+    } finally {
+      setIsUploading(false);
+      recordingRef.current = null;
+    }
+  };
 
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
@@ -165,14 +258,41 @@ export default function RecordLectureScreen() {
                 />
               </View>
               
-              <SuccessTick />
-              
-              <View style={[styles.timerContainer, { marginTop: 20 }]}>
+              <View style={[styles.timerContainer, { marginBottom: 30 }]}>
                 <Text style={styles.timerText}>
                   {m} <Text style={styles.timerLabel}>min</Text>  {s.toString().padStart(2, '0')} <Text style={styles.timerLabel}>s</Text>
                 </Text>
                 <Text style={styles.finishLabel}>Total Recording Time</Text>
               </View>
+
+              {uploadProgress < 100 ? (
+                <View style={[styles.progressContainer, { width: '100%', marginBottom: 30 }]}>
+                  <Text style={[styles.progressText, { marginBottom: 10, fontSize: 16 }]}>
+                    Uploading your lecture...
+                  </Text>
+                  <View style={[styles.progressBarBg, { backgroundColor: 'rgba(0,0,0,0.1)' }]}>
+                    <View 
+                      style={[
+                        styles.progressBarFill, 
+                        { 
+                          width: `${uploadProgress}%`,
+                          backgroundColor: Colors.light.primary 
+                        }
+                      ]} 
+                    />
+                  </View>
+                  <Text style={styles.progressText}>
+                    {Math.round(uploadProgress)}% Complete
+                  </Text>
+                </View>
+              ) : (
+                <View style={{ alignItems: 'center', marginBottom: 20 }}>
+                  <SuccessTick />
+                  <Text style={[styles.progressText, { marginTop: 10, fontSize: 18 }]}>
+                    Upload Complete!
+                  </Text>
+                </View>
+              )}
             </View>
           )}
         </ScrollView>
@@ -181,7 +301,7 @@ export default function RecordLectureScreen() {
           {status === 'idle' && (
             <TouchableOpacity
               style={styles.startButton}
-              onPress={() => setStatus('recording')}
+              onPress={startRecordingFlow}
               activeOpacity={0.85}
             >
               <IconSymbol name="mic.fill" size={24} color="#FFF" />
@@ -194,9 +314,10 @@ export default function RecordLectureScreen() {
               style={[styles.stopButton, seconds < 10 && { opacity: 0.5 }]}
               onPress={() => {
                 if (seconds < 10) return;
-                setStatus('finished');
+                stopRecordingFlow();
               }}
               activeOpacity={seconds < 10 ? 1 : 0.85}
+              disabled={seconds < 10}
             >
               <View style={styles.stopIconSquare} />
               <Text style={styles.stopText}>
@@ -207,11 +328,17 @@ export default function RecordLectureScreen() {
 
           {status === 'finished' && (
             <TouchableOpacity
-              style={styles.finishButton}
-              onPress={() => router.push('/lecture/1')}
+              style={[
+                styles.finishButton, 
+                uploadProgress < 100 && { backgroundColor: '#CCC' }
+              ]}
+              onPress={() => uploadProgress === 100 && router.push('/(tabs)')}
               activeOpacity={0.85}
+              disabled={uploadProgress < 100}
             >
-              <Text style={styles.finishText}>Finish & Save</Text>
+              <Text style={styles.finishText}>
+                {uploadProgress < 100 ? 'Syncing...' : 'Finish & Go Home'}
+              </Text>
             </TouchableOpacity>
           )}
         </View>
@@ -392,10 +519,38 @@ const styles = StyleSheet.create({
   },
   tipText: {
     fontSize: 14,
+    color: '#2D6A2E',
     fontWeight: '600',
-    color: '#1A3A1A',
-    marginLeft: 14,
     flex: 1,
+  },
+  progressContainer: {
+    marginVertical: 20,
+    alignItems: 'center',
+    width: '100%',
+  },
+  progressBarBg: {
+    width: '100%',
+    height: 8,
+    backgroundColor: 'rgba(255,255,255,0.3)',
+    borderRadius: 4,
+    overflow: 'hidden',
+    marginBottom: 8,
+  },
+  progressBarFill: {
+    height: '100%',
+    backgroundColor: '#FFF',
+    borderRadius: 4,
+  },
+  progressText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#2D6A2E',
+    letterSpacing: 0.5,
+  },
+  finishedState: {
+    alignItems: 'center',
+    width: '100%',
+    paddingVertical: 10,
   },
   footer: {
     width: '100%',

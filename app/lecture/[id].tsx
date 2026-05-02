@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Platform, Dimensions } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Platform, Dimensions, Alert } from 'react-native';
+import { authApi, subjectsApi, lecturesApi } from '@/services/api';
 import { useLocalSearchParams, router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Audio } from 'expo-av';
@@ -130,30 +131,92 @@ export default function LectureNotesScreen() {
   const [activeTab, setActiveTab] = useState<'notes' | 'transcript'>('notes');
   const [isPlaying, setIsPlaying] = useState(false);
   const [status, setStatus] = useState<any>(null);
+  const [lecture, setLecture] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [isGeneratingNotes, setIsGeneratingNotes] = useState(false);
+
   const isUserSeeking = useRef(false);
   const sound = useRef<Audio.Sound | null>(null);
 
   useEffect(() => {
-    loadAudio();
+    fetchLectureData();
     return () => {
       if (sound.current) {
         sound.current.unloadAsync();
       }
     };
-  }, []);
+  }, [id]);
 
-  async function loadAudio() {
+  const fetchLectureData = async () => {
     try {
+      const data = await lecturesApi.getLecture(id as string);
+      setLecture(data);
+      if (data.audio_url) {
+        loadAudio(data.audio_url);
+      }
+    } catch (err) {
+      console.error('Fetch lecture error:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  async function loadAudio(uri: string) {
+    if (!uri) return;
+    try {
+      console.log('[Audio] Loading from:', uri);
+      if (sound.current) {
+        await sound.current.unloadAsync();
+      }
       const { sound: newSound } = await Audio.Sound.createAsync(
-        require('@/assets/audio/audio_sample.mp3'),
+        { 
+          uri, 
+          headers: { 'ngrok-skip-browser-warning': '1' } 
+        },
         { shouldPlay: false, progressUpdateIntervalMillis: 50 },
         onPlaybackStatusUpdate
       );
       sound.current = newSound;
+      console.log('[Audio] Loaded successfully');
     } catch (error) {
-      console.log('Error loading audio:', error);
+      console.error('[Audio] Error loading:', error);
     }
   }
+
+  const handleTranscribe = async () => {
+    try {
+      setIsTranscribing(true);
+      await lecturesApi.transcribeLecture(id as string);
+      
+      // Immediately refresh data to update status in UI
+      await fetchLectureData();
+      
+      Alert.alert(
+        "Transcription Started", 
+        "We're processing your audio. This usually takes a few minutes. You can check back later or use the refresh button."
+      );
+    } catch (err) {
+      console.error('Transcribe error:', err);
+      Alert.alert("Error", "Failed to start transcription. Please try again.");
+    } finally {
+      setIsTranscribing(false);
+    }
+  };
+
+  const handleGenerateNotes = async () => {
+    try {
+      setIsGeneratingNotes(true);
+      await lecturesApi.generateNotes(id as string);
+      await fetchLectureData();
+      Alert.alert("Success", "Study notes and key terms generated successfully!");
+    } catch (err) {
+      console.error('Notes error:', err);
+      Alert.alert("Error", "Failed to generate notes. Make sure transcription is complete.");
+    } finally {
+      setIsGeneratingNotes(false);
+    }
+  };
 
   function onPlaybackStatusUpdate(newStatus: any) {
     if (newStatus.isLoaded && !isUserSeeking.current) {
@@ -190,7 +253,12 @@ export default function LectureNotesScreen() {
 
   const currentSeconds = status?.positionMillis ? status.positionMillis / 1000 : 0;
   const progress = status?.durationMillis ? status.positionMillis / status.durationMillis : 0;
-  const activeTranscriptIndex = MOCK_TRANSCRIPT.reduce((best, item, i) => item.seconds <= currentSeconds ? i : best, 0);
+  
+  // Use real segments for active index if available
+  const segments = lecture?.segments || [];
+  const activeTranscriptIndex = segments.reduce((best: number, item: any, i: number) => 
+    item.start <= currentSeconds ? i : best, -1
+  );
 
   const formatTime = (millis: number) => {
     const s = millis / 1000;
@@ -206,11 +274,14 @@ export default function LectureNotesScreen() {
             <IconSymbol name="chevron.left" size={24} color="#000" />
           </TouchableOpacity>
           <View style={styles.headerCenter}>
-            <Text style={styles.headerTitle}>Calculus Ch 3</Text>
-            <Text style={styles.headerSubtitle}>Oct 12 • 45 min</Text>
+            <Text style={styles.headerTitle}>{lecture?.title || 'Loading...'}</Text>
+            <Text style={styles.headerSubtitle}>
+              {lecture ? new Date(lecture.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : ''} 
+              {lecture?.duration ? ` • ${Math.round(lecture.duration / 60)} min` : ''}
+            </Text>
           </View>
-          <TouchableOpacity style={styles.moreButton}>
-            <IconSymbol name="ellipsis" size={22} color="#555" />
+          <TouchableOpacity style={styles.moreButton} onPress={fetchLectureData}>
+            <IconSymbol name="arrow.clockwise" size={20} color="#555" />
           </TouchableOpacity>
         </View>
 
@@ -238,31 +309,65 @@ export default function LectureNotesScreen() {
         <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
           {activeTab === 'notes' ? (
             <View style={styles.notesContainer}>
+              {/* Show Generate Notes if summary is empty and NOT generating */}
+              {!lecture?.summary && !isGeneratingNotes && (
+                <View style={styles.generateContainer}>
+                  <View style={[styles.emptyIconCircle, { backgroundColor: 'rgba(156, 39, 176, 0.1)' }]}>
+                    <IconSymbol name="book.fill" size={32} color="#9C27B0" />
+                  </View>
+                  <Text style={styles.generateTitle}>No notes yet</Text>
+                  <Text style={styles.generateSubtitle}>Let AI analyze your transcript to create structured study notes and key terms.</Text>
+                  <TouchableOpacity 
+                    style={[styles.generateButton, { backgroundColor: '#9C27B0' }]} 
+                    onPress={handleGenerateNotes}
+                  >
+                    <Text style={styles.generateButtonText}>Generate Study Notes</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              {/* Show Generating Notes state */}
+              {isGeneratingNotes && (
+                <View style={styles.transcribingState}>
+                  <Animated.View style={[styles.pulseContainer, { backgroundColor: 'rgba(156, 39, 176, 0.05)' }]}>
+                    <IconSymbol name="sparkles" size={40} color="#9C27B0" />
+                  </Animated.View>
+                  <Text style={styles.transcribingTitle}>Generating Notes...</Text>
+                  <Text style={styles.transcribingSubtitle}>Our AI is analyzing your transcript to extract the most important information.</Text>
+                </View>
+              )}
+
               {/* Key Terms Row */}
-              <View style={styles.keyTermsSection}>
-                <Text style={styles.sectionLabel}>KEY TERMS</Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.keyTermsScroll}>
-                  {MOCK_KEY_TERMS.map((item, i) => (
-                    <View key={i} style={[styles.keyTermChip, { backgroundColor: item.color }]}>
-                      <Text style={styles.keyTermText}>{item.term}</Text>
-                    </View>
-                  ))}
-                </ScrollView>
-              </View>
+              {lecture?.key_terms && (
+                <View style={styles.keyTermsSection}>
+                  <Text style={styles.sectionLabel}>KEY TERMS</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.keyTermsScroll}>
+                    {(typeof lecture.key_terms === 'string' ? JSON.parse(lecture.key_terms) : lecture.key_terms).map((item: any, i: number) => (
+                      <View key={i} style={[styles.keyTermChip, { backgroundColor: item.color || '#EEE' }]}>
+                        <Text style={styles.keyTermText}>{item.term}</Text>
+                      </View>
+                    ))}
+                  </ScrollView>
+                </View>
+              )}
 
               {/* Notes Cards */}
-              <Text style={styles.sectionLabel}>SUMMARY</Text>
-              {MOCK_NOTES.map((note, index) => (
-                <Card key={index} style={styles.noteCard}>
-                  <View style={styles.noteHeader}>
-                    <View style={styles.noteNumberBadge}>
-                      <Text style={styles.noteNumber}>{index + 1}</Text>
-                    </View>
-                    <Text style={styles.noteTitle}>{note.title}</Text>
-                  </View>
-                  <Text style={styles.noteText}>{note.text}</Text>
-                </Card>
-              ))}
+              {lecture?.summary && (
+                <>
+                  <Text style={styles.sectionLabel}>SUMMARY</Text>
+                  {(typeof lecture.summary === 'string' ? JSON.parse(lecture.summary) : lecture.summary).map((note: any, index: number) => (
+                    <Card key={index} style={styles.noteCard}>
+                      <View style={styles.noteHeader}>
+                        <View style={styles.noteNumberBadge}>
+                          <Text style={styles.noteNumber}>{index + 1}</Text>
+                        </View>
+                        <Text style={styles.noteTitle}>{note.title}</Text>
+                      </View>
+                      <Text style={styles.noteText}>{note.text}</Text>
+                    </Card>
+                  ))}
+                </>
+              )}
             </View>
           ) : (
             <View style={styles.transcriptContainer}>
@@ -296,36 +401,85 @@ export default function LectureNotesScreen() {
                 />
               </View>
 
-              {/* ─── Transcript List ─── */}
-              {MOCK_TRANSCRIPT.map((item, index) => {
-                const isActive = index === activeTranscriptIndex;
-                return (
+              {/* ─── Transcript Content ─── */}
+              {/* Show Generate Button only if NOT transcribing and NO transcription exists */}
+              {!lecture?.transcription && lecture?.status !== 'transcribing' && !isTranscribing && (
+                <View style={styles.generateContainer}>
+                  <View style={styles.emptyIconCircle}>
+                    <IconSymbol name="mic.fill" size={32} color={Colors.light.primary} />
+                  </View>
+                  <Text style={styles.generateTitle}>No transcript yet</Text>
+                  <Text style={styles.generateSubtitle}>Convert your audio recording into text for easier studying.</Text>
                   <TouchableOpacity 
-                    key={index} 
-                    onPress={() => handleSkipTo(item.seconds)}
-                    activeOpacity={0.7}
+                    style={styles.generateButton} 
+                    onPress={handleTranscribe}
+                    disabled={isTranscribing}
                   >
-                    <View style={[styles.transcriptCard, isActive && styles.activeTranscriptCard]}>
-                      <View style={styles.transcriptLeft}>
-                        <View style={[styles.timelineDot, isActive && styles.activeTimelineDot]} />
-                        {index < MOCK_TRANSCRIPT.length - 1 && <View style={styles.timelineLine} />}
-                      </View>
-                      <View style={styles.transcriptBody}>
-                        <View style={styles.transcriptHeader}>
-                          <Text style={[styles.timestampText, isActive && styles.activeTimestamp]}>{item.time}</Text>
-                          {isActive && (
-                            <View style={styles.liveIndicator}>
-                              <View style={styles.liveDot} />
-                              <Text style={styles.liveText}>Live</Text>
-                            </View>
-                          )}
-                        </View>
-                        <Text style={[styles.transcriptText, isActive && styles.activeTranscriptText]}>{item.text}</Text>
-                      </View>
-                    </View>
+                    <Text style={styles.generateButtonText}>
+                      {lecture?.status === 'failed' ? 'Retry Transcription' : 'Generate Transcript'}
+                    </Text>
                   </TouchableOpacity>
-                );
-              })}
+                </View>
+              )}
+
+              {/* Show Progress State if currently transcribing */}
+              {(lecture?.status === 'transcribing' || isTranscribing) && !lecture?.transcription && (
+                <View style={styles.transcribingState}>
+                  <Animated.View style={styles.pulseContainer}>
+                    <IconSymbol name="waveform" size={40} color={Colors.light.primary} />
+                  </Animated.View>
+                  <Text style={styles.transcribingTitle}>Generating transcript...</Text>
+                  <Text style={styles.transcribingSubtitle}>Your transcript is being prepared. It will appear here automatically once finished.</Text>
+                  <TouchableOpacity 
+                    style={styles.refreshButton} 
+                    onPress={fetchLectureData}
+                  >
+                    <IconSymbol name="arrow.clockwise" size={14} color={Colors.light.primary} />
+                    <Text style={styles.refreshButtonText}>Refresh Status</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              {lecture?.segments && lecture.segments.length > 0 ? (
+                <View style={styles.segmentsList}>
+                  {lecture.segments.map((item: any, index: number) => {
+                    const isActive = index === activeTranscriptIndex;
+                    return (
+                      <TouchableOpacity 
+                        key={index} 
+                        onPress={() => handleSkipTo(item.start)}
+                        activeOpacity={0.7}
+                      >
+                        <View style={[styles.transcriptCard, isActive && styles.activeTranscriptCard]}>
+                          <View style={styles.transcriptLeft}>
+                            <View style={[styles.timelineDot, isActive && styles.activeTimelineDot]} />
+                            {index < lecture.segments.length - 1 && <View style={styles.timelineLine} />}
+                          </View>
+                          <View style={styles.transcriptBody}>
+                            <View style={styles.transcriptHeader}>
+                              <Text style={[styles.timestampText, isActive && styles.activeTimestamp]}>
+                                {Math.floor(item.start / 60).toString().padStart(2, '0')}:
+                                {Math.floor(item.start % 60).toString().padStart(2, '0')}
+                              </Text>
+                              {isActive && (
+                                <View style={styles.liveIndicator}>
+                                  <View style={styles.liveDot} />
+                                  <Text style={styles.liveText}>Active</Text>
+                                </View>
+                              )}
+                            </View>
+                            <Text style={[styles.transcriptText, isActive && styles.activeTranscriptText]}>{item.text}</Text>
+                          </View>
+                        </View>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              ) : lecture?.transcription ? (
+                <View style={styles.transcriptionTextContainer}>
+                  <Text style={styles.realTranscriptionText}>{lecture.transcription}</Text>
+                </View>
+              ) : null}
             </View>
           )}
         </ScrollView>
@@ -735,5 +889,116 @@ const styles = StyleSheet.create({
   activeTranscriptText: {
     color: '#222',
     fontWeight: '600',
+  },
+  // Transcription Empty/Loading States
+  generateContainer: {
+    padding: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFF',
+    borderRadius: 32,
+    marginTop: 20,
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 10 },
+        shadowOpacity: 0.05,
+        shadowRadius: 20,
+      },
+      android: { elevation: 2 },
+    }),
+  },
+  emptyIconCircle: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: 'rgba(75, 90, 225, 0.1)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 24,
+  },
+  generateTitle: {
+    fontSize: 22,
+    fontWeight: '900',
+    color: '#000',
+    marginBottom: 8,
+  },
+  generateSubtitle: {
+    fontSize: 15,
+    color: '#666',
+    textAlign: 'center',
+    lineHeight: 22,
+    marginBottom: 32,
+    paddingHorizontal: 20,
+  },
+  generateButton: {
+    backgroundColor: Colors.light.primary,
+    paddingHorizontal: 32,
+    paddingVertical: 16,
+    borderRadius: 20,
+    ...Platform.select({
+      ios: {
+        shadowColor: Colors.light.primary,
+        shadowOffset: { width: 0, height: 10 },
+        shadowOpacity: 0.3,
+        shadowRadius: 15,
+      },
+      android: { elevation: 4 },
+    }),
+  },
+  generateButtonText: {
+    color: '#FFF',
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  transcribingState: {
+    padding: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  transcribingTitle: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: '#000',
+    marginTop: 24,
+    marginBottom: 8,
+  },
+  transcribingSubtitle: {
+    fontSize: 14,
+    color: '#999',
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 24,
+  },
+  refreshButton: {
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: '#F5F5F5',
+  },
+  refreshButtonText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: Colors.light.primary,
+  },
+  pulseContainer: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: 'rgba(75, 90, 225, 0.05)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  transcriptionTextContainer: {
+    padding: 24,
+    backgroundColor: '#FFF',
+    borderRadius: 24,
+    marginTop: 20,
+  },
+  realTranscriptionText: {
+    fontSize: 16,
+    lineHeight: 28,
+    color: '#333',
+    fontWeight: '500',
   },
 });

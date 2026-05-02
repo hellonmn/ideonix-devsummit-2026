@@ -1,5 +1,5 @@
-import React from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Platform, Image } from 'react-native';
+import React, { useState, useMemo } from 'react';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Platform, Image, Modal, FlatList, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useFocusEffect } from 'expo-router';
 import { Colors } from '@/constants/colors';
@@ -23,19 +23,62 @@ const QUICK_ACTIONS = [
 ];
 
 export default function HomeScreen() {
-  const [user, setUser] = React.useState<{name: string} | null>(null);
-  const [subjects, setSubjects] = React.useState<any[]>([]);
+  const [user, setUser] = useState<{name: string} | null>(null);
+  const [subjects, setSubjects] = useState<any[]>([]);
+  const [showSubjectModal, setShowSubjectModal] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const fetchHomeData = async () => {
+    try {
+      const [userData, subjectsData] = await Promise.all([
+        authApi.getMe(),
+        subjectsApi.getSubjects()
+      ]);
+      setUser(userData.user);
+      setSubjects(subjectsData);
+    } catch (err) {
+      console.error('Home refresh error:', err);
+    }
+  };
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await fetchHomeData();
+    setRefreshing(false);
+  };
+
+  const handleStartRecording = (subject?: any) => {
+    if (subject) {
+      setShowSubjectModal(false);
+      router.push({
+        pathname: '/lecture/record',
+        params: { subjectId: subject.id, subjectTitle: subject.title }
+      });
+    } else {
+      setShowSubjectModal(true);
+    }
+  };
 
   useFocusEffect(
     React.useCallback(() => {
-      authApi.getMe().then(data => setUser(data.user)).catch(() => {});
-      subjectsApi.getSubjects().then(data => setSubjects(data)).catch(() => {});
+      fetchHomeData();
     }, [])
   );
 
   return (
     <SafeAreaView style={styles.container}>
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+      <ScrollView 
+        showsVerticalScrollIndicator={false} 
+        contentContainerStyle={styles.scrollContent}
+        refreshControl={
+          <RefreshControl 
+            refreshing={refreshing} 
+            onRefresh={onRefresh}
+            colors={[Colors.light.primary]}
+            tintColor={Colors.light.primary}
+          />
+        }
+      >
         
         <View style={styles.header}>
           <View>
@@ -55,15 +98,11 @@ export default function HomeScreen() {
         <Card backgroundColor={Colors.light.primary} style={styles.mascotBanner}>
           <View style={styles.bannerContent}>
             <View style={styles.bannerTextContainer}>
-              <View style={styles.streakBadge}>
-                <IconSymbol name="bolt.fill" size={14} color="#FFF" />
-                <Text style={styles.streakText}>5 DAY STREAK</Text>
-              </View>
               <Text style={styles.bannerTitle}>Unleash Your Potential!</Text>
               <Text style={styles.bannerSubtitle}>You're on fire! Ready to crush today's lectures?</Text>
               <TouchableOpacity 
                 style={styles.bannerButton}
-                onPress={() => router.push('/lecture/record')}
+                onPress={() => handleStartRecording()}
               >
                 <Text style={styles.bannerButtonText}>Start Recording</Text>
                 <IconSymbol name="chevron.right" size={16} color={Colors.light.primary} />
@@ -87,7 +126,7 @@ export default function HomeScreen() {
             <TouchableOpacity 
               key={action.id} 
               style={styles.actionItem}
-              onPress={() => router.push(action.route as any)}
+              onPress={() => action.id === 'record' ? handleStartRecording() : router.push(action.route as any)}
             >
               <View style={[styles.actionIcon, { backgroundColor: action.color }]}>
                 <IconSymbol name={action.icon as any} size={24} color="#FFF" />
@@ -160,6 +199,64 @@ export default function HomeScreen() {
         </View>
 
       </ScrollView>
+
+      <Modal
+        visible={showSubjectModal}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setShowSubjectModal(false)}
+      >
+        <TouchableOpacity 
+          style={styles.modalOverlay} 
+          activeOpacity={1} 
+          onPress={() => setShowSubjectModal(false)}
+        >
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Select Subject</Text>
+              <TouchableOpacity onPress={() => setShowSubjectModal(false)}>
+                <IconSymbol name="xmark" size={24} color="#333" />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.modalSubtitle}>Which subject are you recording for today?</Text>
+            
+            <FlatList
+              data={subjects}
+              keyExtractor={(item) => item.id.toString()}
+              renderItem={({ item }) => (
+                <TouchableOpacity 
+                  style={styles.subjectItem}
+                  onPress={() => handleStartRecording(item)}
+                >
+                  <View style={[styles.subjectIcon, { backgroundColor: item.color || Colors.light.primary }]}>
+                    <IconSymbol name={(item.icon || 'book.fill') as any} size={20} color="#FFF" />
+                  </View>
+                  <View style={styles.subjectInfo}>
+                    <Text style={styles.subjectItemTitle}>{item.title}</Text>
+                    <Text style={styles.subjectItemDesc}>{item.description || 'No description'}</Text>
+                  </View>
+                  <IconSymbol name="chevron.right" size={16} color="#CCC" />
+                </TouchableOpacity>
+              )}
+              ListEmptyComponent={
+                <View style={styles.emptySubjects}>
+                  <Text style={styles.emptyText}>No subjects found.</Text>
+                  <TouchableOpacity 
+                    style={styles.addSubjectButton}
+                    onPress={() => {
+                      setShowSubjectModal(false);
+                      router.push('/subject/add');
+                    }}
+                  >
+                    <Text style={styles.addSubjectText}>Add Subject</Text>
+                  </TouchableOpacity>
+                </View>
+              }
+              contentContainerStyle={styles.modalList}
+            />
+          </View>
+        </TouchableOpacity>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -374,6 +471,86 @@ const styles = StyleSheet.create({
   },
   cardContent: {
     marginTop: 'auto',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  modalContent: {
+    backgroundColor: '#FFF',
+    borderTopLeftRadius: 32,
+    borderTopRightRadius: 32,
+    paddingTop: 24,
+    paddingHorizontal: 24,
+    paddingBottom: Platform.OS === 'ios' ? 40 : 24,
+    maxHeight: '80%',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  modalTitle: {
+    fontSize: 22,
+    fontWeight: '800',
+    color: '#000',
+  },
+  modalSubtitle: {
+    fontSize: 15,
+    color: '#666',
+    marginBottom: 20,
+  },
+  modalList: {
+    paddingBottom: 20,
+  },
+  subjectItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F0F0F0',
+  },
+  subjectIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 14,
+  },
+  subjectInfo: {
+    flex: 1,
+  },
+  subjectItemTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#000',
+  },
+  subjectItemDesc: {
+    fontSize: 13,
+    color: '#888',
+    marginTop: 2,
+  },
+  emptySubjects: {
+    alignItems: 'center',
+    paddingVertical: 40,
+  },
+  emptyText: {
+    fontSize: 16,
+    color: '#999',
+    marginBottom: 16,
+  },
+  addSubjectButton: {
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 20,
+    backgroundColor: Colors.light.primary,
+  },
+  addSubjectText: {
+    color: '#FFF',
+    fontWeight: '700',
   },
   subjectTitle: {
     fontSize: 17,

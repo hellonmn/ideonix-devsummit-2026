@@ -1,7 +1,8 @@
 import { Platform } from 'react-native';
 
-// Use the machine's local IP address to allow physical devices (Expo Go) to connect to the backend
-const BASE_URL = 'http://10.207.196.52:3001';
+// 🚀 CONFIGURATION: Using ngrok for a stable backend URL
+const BASE_URL = 'https://eternal-viper-hardly.ngrok-free.app'; 
+
 
 import * as SecureStore from 'expo-secure-store';
 
@@ -31,6 +32,7 @@ async function request(endpoint: string, options: RequestInit = {}) {
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    'ngrok-skip-browser-warning': '1', // Bypass ngrok warning page
     ...(options.headers as Record<string, string> || {}),
   };
 
@@ -44,7 +46,14 @@ async function request(endpoint: string, options: RequestInit = {}) {
     headers,
   });
 
-  const data = await response.json();
+  const text = await response.text();
+  let data: any = {};
+  try {
+    data = JSON.parse(text);
+  } catch (e) {
+    // If it's not JSON, we'll treat the text as an error message if not ok
+    console.warn(`[API] Non-JSON response from ${endpoint}:`, text.substring(0, 100));
+  }
 
   if (!response.ok) {
     // Attempt token refresh on 401
@@ -59,7 +68,7 @@ async function request(endpoint: string, options: RequestInit = {}) {
         return retryResponse.json();
       }
     }
-    throw new ApiError(data.error || 'Request failed', response.status, data);
+    throw new ApiError(data.error || text || 'Request failed', response.status, data);
   }
 
   return data;
@@ -152,6 +161,10 @@ export const subjectsApi = {
   async getSubjects() {
     return request('/api/subjects');
   },
+  
+  async getSubject(id: string | number) {
+    return request(`/api/subjects/${id}`);
+  },
 
   async addSubject(title: string, description?: string, color?: string, icon?: string) {
     return request('/api/subjects', {
@@ -170,6 +183,128 @@ export const subjectsApi = {
   async deleteSubject(id: string | number) {
     return request(`/api/subjects/${id}`, {
       method: 'DELETE',
+    });
+  },
+};
+
+// ─── Lectures API ───
+export const lecturesApi = {
+  async getLecture(id: string | number) {
+    return request(`/api/lectures/${id}`);
+  },
+
+  async getLecturesBySubject(subjectId: string | number) {
+    return request(`/api/lectures/subject/${subjectId}`);
+  },
+
+  async startLecture(title: string, subjectId?: string | number) {
+    return request('/api/lectures/start', {
+      method: 'POST',
+      body: JSON.stringify({ title, subjectId }),
+    });
+  },
+
+  async uploadChunk(sessionId: string, chunkIndex: number, audioUri: string) {
+    const accessToken = await getAccessToken();
+    
+    // Using native Fetch with FormData for file upload
+    const formData = new FormData();
+    formData.append('sessionId', sessionId);
+    formData.append('chunkIndex', chunkIndex.toString());
+    
+    // @ts-ignore
+    formData.append('audio', {
+      uri: audioUri.startsWith('file://') ? audioUri : `file://${audioUri}`,
+      type: 'audio/m4a',
+      name: `chunk_${chunkIndex}.m4a`,
+    });
+
+    console.log(`[API] Uploading chunk ${chunkIndex} from: ${audioUri}`);
+
+    const response = await fetch(`${BASE_URL}/api/lectures/upload-chunk`, {
+      method: 'POST',
+      body: formData,
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'ngrok-skip-browser-warning': '1',
+      },
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || 'Failed to upload chunk');
+    }
+
+    return response.json();
+  },
+
+  async uploadFull(sessionId: string, audioUri: string, onProgress: (progress: number) => void) {
+    const accessToken = await getAccessToken();
+    const url = `${BASE_URL}/api/lectures/upload-full?sessionId=${sessionId}`;
+
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', url);
+
+      xhr.setRequestHeader('Authorization', `Bearer ${accessToken}`);
+      xhr.setRequestHeader('ngrok-skip-browser-warning', '1');
+
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          const progress = (event.loaded / event.total) * 100;
+          onProgress(progress);
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch (e) {
+            resolve({ message: 'Upload successful' });
+          }
+        } else {
+          reject(new Error(xhr.responseText || 'Upload failed'));
+        }
+      };
+
+      xhr.onerror = () => reject(new Error('Network error during upload'));
+
+      const formData = new FormData();
+      formData.append('sessionId', sessionId);
+      // @ts-ignore
+      formData.append('audio', {
+        uri: audioUri.startsWith('file://') ? audioUri : `file://${audioUri}`,
+        type: 'application/octet-stream',
+        name: 'full_audio.m4a',
+      });
+
+      xhr.send(formData);
+    });
+  },
+
+  async finishLecture(sessionId: string, title: string, subjectId?: string | number) {
+    return request('/api/lectures/finish', {
+      method: 'POST',
+      body: JSON.stringify({ sessionId, title, subjectId }),
+    });
+  },
+  
+  async deleteLecture(id: string | number) {
+    return request(`/api/lectures/${id}`, {
+      method: 'DELETE',
+    });
+  },
+
+  async transcribeLecture(id: string | number) {
+    return request(`/api/lectures/${id}/transcribe`, {
+      method: 'POST',
+    });
+  },
+
+  async generateNotes(id: string | number) {
+    return request(`/api/lectures/${id}/notes`, {
+      method: 'POST',
     });
   },
 };

@@ -3,25 +3,38 @@ import { View, Text, StyleSheet, TouchableOpacity, Platform, ActivityIndicator, 
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '@/constants/colors';
 import { IconSymbol } from '@/components/ui/icon-symbol';
-import { authApi } from '@/services/api';
+import { authApi, subjectsApi, lecturesApi } from '@/services/api';
 import { router } from 'expo-router';
 
 export default function ProfileScreen() {
   const [user, setUser] = useState<{name: string, email: string} | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const [stats, setStats] = useState({ lectures: 0, subjects: 0 });
+
   useEffect(() => {
-    const fetchUser = async () => {
+    const fetchData = async () => {
       try {
-        const data = await authApi.getMe();
-        setUser(data.user);
+        const [userData, subjectsData] = await Promise.all([
+          authApi.getMe(),
+          subjectsApi.getSubjects()
+        ]);
+        setUser(userData.user);
+        setStats(prev => ({ ...prev, subjects: subjectsData.length }));
+        
+        // Fetch all lectures across all subjects to get total count
+        const allLectures = await Promise.all(
+          subjectsData.map((s: any) => lecturesApi.getLecturesBySubject(s.id))
+        );
+        const totalLectures = allLectures.reduce((acc, curr) => acc + curr.length, 0);
+        setStats(prev => ({ ...prev, lectures: totalLectures }));
       } catch (err) {
-        console.error('Failed to fetch user:', err);
+        console.error('Failed to fetch profile data:', err);
       } finally {
         setLoading(false);
       }
     };
-    fetchUser();
+    fetchData();
   }, []);
 
   const handleLogout = async () => {
@@ -55,15 +68,15 @@ export default function ProfileScreen() {
 
       <View style={styles.statsRow}>
         <View style={[styles.statCard, { backgroundColor: Colors.light.yellow }]}>
-          <Text style={styles.statNumber}>12</Text>
+          <Text style={styles.statNumber}>{stats.lectures}</Text>
           <Text style={styles.statLabel}>Lectures</Text>
         </View>
         <View style={[styles.statCard, { backgroundColor: Colors.light.green }]}>
-          <Text style={styles.statNumber}>4</Text>
+          <Text style={styles.statNumber}>{stats.subjects}</Text>
           <Text style={styles.statLabel}>Subjects</Text>
         </View>
         <View style={[styles.statCard, { backgroundColor: Colors.light.pink }]}>
-          <Text style={styles.statNumber}>8h</Text>
+          <Text style={styles.statNumber}>0h</Text>
           <Text style={styles.statLabel}>Recorded</Text>
         </View>
       </View>
