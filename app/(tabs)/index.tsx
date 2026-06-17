@@ -30,14 +30,16 @@ export default function HomeScreen() {
 
   const fetchHomeData = async () => {
     try {
+      console.log('[Home] Fetching home data...');
       const [userData, subjectsData] = await Promise.all([
         authApi.getMe(),
         subjectsApi.getSubjects()
       ]);
+      console.log('[Home] Got user:', userData?.user?.name, '| Subjects:', subjectsData?.length);
       setUser(userData.user);
       setSubjects(subjectsData);
-    } catch (err) {
-      console.error('Home refresh error:', err);
+    } catch (err: any) {
+      console.error('[Home] Refresh error:', err?.message, err?.status, err);
     }
   };
 

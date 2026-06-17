@@ -1,10 +1,33 @@
-import { Platform } from 'react-native';
-
 // 🚀 CONFIGURATION: Using ngrok for a stable backend URL
 const BASE_URL = 'https://eternal-viper-hardly.ngrok-free.app'; 
 
-
 import * as SecureStore from 'expo-secure-store';
+
+// ─── Fetch with Timeout (prevents hanging on Android) ───
+const FETCH_TIMEOUT_MS = 15000;
+
+async function fetchWithTimeout(url: string, options: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    console.error(`[API] Fetch timeout after ${FETCH_TIMEOUT_MS}ms for: ${url}`);
+    controller.abort();
+  }, FETCH_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    return response;
+  } catch (err: any) {
+    if (err.name === 'AbortError') {
+      throw new Error(`Request timed out after ${FETCH_TIMEOUT_MS / 1000}s`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
 
 // ─── Token Storage (Persistent via expo-secure-store) ───
 
@@ -28,6 +51,7 @@ export async function getRefreshToken() {
 
 // ─── HTTP Helpers ───
 async function request(endpoint: string, options: RequestInit = {}) {
+  console.log(`[API] request() called for: ${endpoint}`);
   const url = `${BASE_URL}${endpoint}`;
 
   const headers: Record<string, string> = {
@@ -37,14 +61,24 @@ async function request(endpoint: string, options: RequestInit = {}) {
   };
 
   const accessToken = await getAccessToken();
+  console.log(`[API] Got access token: ${accessToken ? 'yes (' + accessToken.substring(0, 10) + '...)' : 'no'}`);
   if (accessToken) {
     headers['Authorization'] = `Bearer ${accessToken}`;
   }
 
-  const response = await fetch(url, {
-    ...options,
-    headers,
-  });
+  console.log(`[API] ${options.method || 'GET'} ${url}`);
+
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(url, {
+      ...options,
+      headers,
+    });
+    console.log(`[API] Response ${response.status} from ${endpoint}`);
+  } catch (networkErr: any) {
+    console.error(`[API] Network error for ${endpoint}:`, networkErr.message);
+    throw new ApiError(`Network error: ${networkErr.message}`, 0, {});
+  }
 
   const text = await response.text();
   let data: any = {};
@@ -52,20 +86,38 @@ async function request(endpoint: string, options: RequestInit = {}) {
     data = JSON.parse(text);
   } catch (e) {
     // If it's not JSON, we'll treat the text as an error message if not ok
-    console.warn(`[API] Non-JSON response from ${endpoint}:`, text.substring(0, 100));
+    console.warn(`[API] Non-JSON response from ${endpoint}:`, text.substring(0, 200));
   }
 
   if (!response.ok) {
-    // Attempt token refresh on 401
-    const refreshToken = await getRefreshToken();
-    if (response.status === 401 && data.code === 'TOKEN_EXPIRED' && refreshToken) {
-      const refreshed = await attemptRefresh();
-      if (refreshed) {
-        // Retry the original request with the new token
-        const newAccessToken = await getAccessToken();
-        headers['Authorization'] = `Bearer ${newAccessToken}`;
-        const retryResponse = await fetch(url, { ...options, headers });
-        return retryResponse.json();
+    console.warn(`[API] ${response.status} from ${endpoint}:`, JSON.stringify(data).substring(0, 200));
+
+    // Attempt token refresh on ANY 401 (not just TOKEN_EXPIRED)
+    if (response.status === 401) {
+      const refreshToken = await getRefreshToken();
+      if (refreshToken) {
+        console.log(`[API] Got 401 on ${endpoint}, attempting token refresh...`);
+        const refreshed = await attemptRefresh();
+        if (refreshed) {
+          // Retry the original request with the new token
+          const newAccessToken = await getAccessToken();
+          headers['Authorization'] = `Bearer ${newAccessToken}`;
+          console.log(`[API] Retrying ${endpoint} with refreshed token`);
+          const retryResponse = await fetchWithTimeout(url, { ...options, headers });
+          const retryText = await retryResponse.text();
+          let retryData: any = {};
+          try {
+            retryData = JSON.parse(retryText);
+          } catch (e) {
+            console.warn(`[API] Non-JSON retry response from ${endpoint}`);
+          }
+          if (!retryResponse.ok) {
+            throw new ApiError(retryData.error || retryText || 'Request failed after refresh', retryResponse.status, retryData);
+          }
+          return retryData;
+        } else {
+          console.warn(`[API] Token refresh failed for ${endpoint}`);
+        }
       }
     }
     throw new ApiError(data.error || text || 'Request failed', response.status, data);
@@ -74,27 +126,45 @@ async function request(endpoint: string, options: RequestInit = {}) {
   return data;
 }
 
-async function attemptRefresh(): Promise<boolean> {
-  try {
-    const refreshToken = await getRefreshToken();
-    const response = await fetch(`${BASE_URL}/api/auth/refresh`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refreshToken }),
-    });
+// Single-flight refresh: if many requests 401 in parallel, only one
+// /refresh call is sent; the rest await the same promise.
+let inFlightRefresh: Promise<boolean> | null = null;
 
-    if (!response.ok) {
+async function attemptRefresh(): Promise<boolean> {
+  if (inFlightRefresh) return inFlightRefresh;
+
+  inFlightRefresh = (async () => {
+    try {
+      const refreshToken = await getRefreshToken();
+      if (!refreshToken) {
+        await clearTokens();
+        return false;
+      }
+
+      console.log('[API] Attempting token refresh...');
+      const response = await fetchWithTimeout(`${BASE_URL}/api/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refreshToken }),
+      });
+
+      if (!response.ok) {
+        await clearTokens();
+        return false;
+      }
+
+      const data = await response.json();
+      await setTokens(data.accessToken, data.refreshToken);
+      return true;
+    } catch {
       await clearTokens();
       return false;
+    } finally {
+      inFlightRefresh = null;
     }
+  })();
 
-    const data = await response.json();
-    await setTokens(data.accessToken, data.refreshToken);
-    return true;
-  } catch {
-    await clearTokens();
-    return false;
-  }
+  return inFlightRefresh;
 }
 
 // ─── Error Class ───
@@ -122,11 +192,14 @@ export const authApi = {
   },
 
   async login(email: string, password: string) {
+    console.log('[API] login() called for:', email);
     const data = await request('/api/auth/login', {
       method: 'POST',
       body: JSON.stringify({ email, password }),
     });
+    console.log('[API] login() got response, setting tokens...');
     await setTokens(data.accessToken, data.refreshToken);
+    console.log('[API] login() complete');
     return data;
   },
 
@@ -144,14 +217,22 @@ export const authApi = {
   },
 
   async logout() {
+    // Always clear tokens first so user can log out even if server is unreachable
+    const refreshToken = await getRefreshToken();
+    await clearTokens();
+    
+    // Best-effort server-side cleanup (don't block on failure)
     try {
-      const refreshToken = await getRefreshToken();
-      await request('/api/auth/logout', {
+      await fetchWithTimeout(`${BASE_URL}/api/auth/logout`, {
         method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'ngrok-skip-browser-warning': '1',
+        },
         body: JSON.stringify({ refreshToken }),
       });
-    } finally {
-      await clearTokens();
+    } catch (e) {
+      console.warn('[API] Server-side logout failed (tokens already cleared locally):', e);
     }
   },
 };

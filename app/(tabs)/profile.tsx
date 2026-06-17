@@ -40,10 +40,11 @@ export default function ProfileScreen() {
   const handleLogout = async () => {
     try {
       await authApi.logout();
-      router.replace('/sign-in');
     } catch (err) {
-      Alert.alert('Logout Error', 'There was a problem logging out.');
+      console.warn('Logout error (tokens already cleared):', err);
     }
+    // Always navigate to sign-in — tokens are cleared client-side first
+    router.replace('/sign-in');
   };
 
   return (

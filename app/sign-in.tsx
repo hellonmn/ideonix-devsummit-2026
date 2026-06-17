@@ -18,11 +18,15 @@ export default function SignInScreen() {
       Alert.alert('Missing Fields', 'Please enter your email and password.');
       return;
     }
+    console.log('[SignIn] Starting login...');
     setLoading(true);
     try {
+      console.log('[SignIn] Calling authApi.login...');
       await authApi.login(email, password);
+      console.log('[SignIn] Login successful, navigating...');
       router.replace('/(tabs)');
-    } catch (err) {
+    } catch (err: any) {
+      console.error('[SignIn] Login failed:', err?.message, err?.status);
       const message = err instanceof ApiError ? err.message : 'Something went wrong. Please try again.';
       Alert.alert('Sign In Failed', message);
     } finally {
